@@ -1,0 +1,6 @@
+.claude/
+node_modules/
+dist/
+tmp/
+coverage/
+*.tgz

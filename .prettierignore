@@ -1,0 +1,7 @@
+dist/
+node_modules/
+tmp/
+test_stack/
+coverage/
+package-lock.json
+CHANGELOG.md

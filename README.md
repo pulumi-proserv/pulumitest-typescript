@@ -30,7 +30,7 @@ describe("my stack", () => {
 
   beforeAll(async () => {
     program = await PulumiProgram.create("my-pulumi-project");
-    await program.addEnvironments("aws/pulumi-ce");
+    await program.addEnvironments("my-org/aws-dev");
   });
 
   afterAll(() => program.cleanup());
@@ -55,7 +55,7 @@ test("deployment", async (t) => {
   const program = await PulumiProgram.create("my-pulumi-project");
   t.after(() => program.cleanup());
 
-  await program.addEnvironments("aws/pulumi-ce");
+  await program.addEnvironments("my-org/aws-dev");
   await program.up();
 });
 ```
@@ -98,6 +98,8 @@ const program = await PulumiProgram.create(
 | `env(key, value)`     | Set custom environment variable     |
 
 The temp directory defaults to `./tmp` under the current working directory, or `$PULUMITEST_TEMP_DIR` when set.
+
+Environment variables from `env()` are passed to the Automation API workspace and take precedence over the defaults, so `env("PULUMI_BACKEND_URL", "file:///tmp/backend")` runs the stack against a local file backend instead of the ambient one.
 
 A custom logger can be supplied through an args object as the second parameter:
 

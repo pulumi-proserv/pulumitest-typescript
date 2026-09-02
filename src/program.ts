@@ -102,10 +102,18 @@ export class PulumiProgram {
         this.logger = logger;
         this.currentStack = undefined;
         this.localWorkspace = undefined;
+        // Custom env vars from the env() option take precedence over defaults.
         this.envVars = {
             PULUMI_BACKEND_URL: process.env.PULUMI_BACKEND_URL ?? "",
             PULUMI_CONFIG_PASSPHRASE: this.options.configPassphrase || "correct horse battery staple",
+            ...this.options.customEnv,
         };
+    }
+
+    /** Env vars to hand to the Automation API, with empty values dropped. */
+    private workspaceEnvVars(): Record<string, string> | undefined {
+        const entries = Object.entries(this.envVars).filter(([, v]) => v !== "");
+        return entries.length > 0 ? Object.fromEntries(entries) : undefined;
     }
 
     /**
@@ -179,7 +187,8 @@ export class PulumiProgram {
 
     private async initStack(): Promise<void> {
         this.logger.info("Creating local workspace...");
-        this.localWorkspace = await auto.LocalWorkspace.create({ workDir: this.workingDir });
+        const envVars = this.workspaceEnvVars();
+        this.localWorkspace = await auto.LocalWorkspace.create({ workDir: this.workingDir, envVars });
 
         if (!this.options.skipInstall) {
             this.logger.info("Running pulumi install...");
@@ -189,10 +198,10 @@ export class PulumiProgram {
         if (!this.options.skipStackCreate) {
             const stackName = this.options.stackName || PulumiProgram.defaultStackName;
             this.logger.info(`Running pulumi stack init... (stack: ${stackName})`);
-            this.currentStack = await auto.LocalWorkspace.createOrSelectStack({
-                stackName,
-                workDir: this.workingDir,
-            });
+            this.currentStack = await auto.LocalWorkspace.createOrSelectStack(
+                { stackName, workDir: this.workingDir },
+                { envVars },
+            );
         } else {
             this.logger.info("Skipping stack creation (skipStackCreate=true)");
         }

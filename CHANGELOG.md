@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `updateSource` for drift testing (swap program files while maintaining the same stack)
 - `copyToTempDir` for isolated test copies
 - `cleanup(raiseOnError)` to optionally surface destroy failures
+- Apply `env()` custom environment variables to the Automation API workspace and stack, so options like `PULUMI_BACKEND_URL` take effect
 - Direct access to Pulumi Automation API via `currentStack` and `localWorkspace` properties
 - CI pipeline with lint and test matrix (Node.js 20, 22, 24)
 - Tag-triggered release pipeline publishing an npm tarball to GitHub Releases

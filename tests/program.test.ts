@@ -80,7 +80,9 @@ describe("PulumiProgram.create", () => {
         expect(program.options.skipStackCreate).toBe(true);
         expect(program.currentStack).toBeUndefined();
         expect(program.localWorkspace).toBe(mocks.workspace);
-        expect(mocks.LocalWorkspace.create).toHaveBeenCalledWith({ workDir: "test_stack" });
+        expect(mocks.LocalWorkspace.create).toHaveBeenCalledWith(
+            expect.objectContaining({ workDir: "test_stack" }),
+        );
         expect(mocks.workspace.install).not.toHaveBeenCalled();
         expect(mocks.LocalWorkspace.createOrSelectStack).not.toHaveBeenCalled();
     });
@@ -89,9 +91,48 @@ describe("PulumiProgram.create", () => {
         const program = await quietProgram(opttest.testInPlace(), opttest.skipInstall());
 
         expect(program.currentStack).toBe(mocks.stack);
-        expect(mocks.LocalWorkspace.createOrSelectStack).toHaveBeenCalledWith({
-            stackName: "test",
+        expect(mocks.LocalWorkspace.createOrSelectStack).toHaveBeenCalledWith(
+            { stackName: "test", workDir: "test_stack" },
+            expect.anything(),
+        );
+    });
+
+    it("passes env vars to the workspace and stack", async () => {
+        const program = await quietProgram(
+            opttest.testInPlace(),
+            opttest.skipInstall(),
+            opttest.env("PULUMI_BACKEND_URL", "file:///tmp/test-backend"),
+            opttest.env("MY_CUSTOM_VAR", "hello"),
+        );
+
+        const expected = {
+            PULUMI_BACKEND_URL: "file:///tmp/test-backend",
+            PULUMI_CONFIG_PASSPHRASE: "correct horse battery staple",
+            MY_CUSTOM_VAR: "hello",
+        };
+        expect(program.getEnvVars()).toEqual(expected);
+        expect(mocks.LocalWorkspace.create).toHaveBeenCalledWith({
             workDir: "test_stack",
+            envVars: expected,
+        });
+        expect(mocks.LocalWorkspace.createOrSelectStack).toHaveBeenCalledWith(
+            { stackName: "test", workDir: "test_stack" },
+            { envVars: expected },
+        );
+    });
+
+    it("drops empty env vars before passing them to the workspace", async () => {
+        const saved = process.env.PULUMI_BACKEND_URL;
+        delete process.env.PULUMI_BACKEND_URL;
+        try {
+            await quietProgram(opttest.testInPlace(), opttest.skipInstall(), opttest.skipStackCreate());
+        } finally {
+            if (saved !== undefined) process.env.PULUMI_BACKEND_URL = saved;
+        }
+
+        expect(mocks.LocalWorkspace.create).toHaveBeenCalledWith({
+            workDir: "test_stack",
+            envVars: { PULUMI_CONFIG_PASSPHRASE: "correct horse battery staple" },
         });
     });
 
@@ -103,10 +144,10 @@ describe("PulumiProgram.create", () => {
     it("uses a custom stack name", async () => {
         await quietProgram(opttest.testInPlace(), opttest.skipInstall(), opttest.stackName("custom"));
 
-        expect(mocks.LocalWorkspace.createOrSelectStack).toHaveBeenCalledWith({
-            stackName: "custom",
-            workDir: "test_stack",
-        });
+        expect(mocks.LocalWorkspace.createOrSelectStack).toHaveBeenCalledWith(
+            { stackName: "custom", workDir: "test_stack" },
+            expect.anything(),
+        );
     });
 
     it("accepts options without an args object", async () => {
@@ -251,7 +292,9 @@ describe("PulumiProgram file operations", () => {
         expect(path.basename(path.dirname(program.workingDir))).toMatch(/^programDir_[0-9a-f]{8}$/);
         expect(fs.readFileSync(path.join(program.workingDir, "index.ts"), "utf8")).toBe("// v1\n");
         expect(fs.readFileSync(path.join(program.workingDir, "nested", "file.txt"), "utf8")).toBe("nested\n");
-        expect(mocks.LocalWorkspace.create).toHaveBeenCalledWith({ workDir: program.workingDir });
+        expect(mocks.LocalWorkspace.create).toHaveBeenCalledWith(
+            expect.objectContaining({ workDir: program.workingDir }),
+        );
     });
 
     it("updateSource replaces files but preserves project and state files", async () => {

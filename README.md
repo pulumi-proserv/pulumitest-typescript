@@ -86,18 +86,30 @@ const program = await PulumiProgram.create(
 );
 ```
 
-| Option                | Description                         |
-| --------------------- | ----------------------------------- |
-| `testInPlace()`       | Run from source directory (no copy) |
-| `skipInstall()`       | Skip `pulumi install`               |
-| `skipStackCreate()`   | Skip stack creation (must exist)    |
-| `stackName(name)`     | Set custom stack name               |
-| `configPassphrase(p)` | Set config passphrase               |
-| `tempDir(path)`       | Set custom temp directory           |
-| `useAmbientBackend()` | Use existing `pulumi login` backend |
-| `env(key, value)`     | Set custom environment variable     |
+| Option                   | Description                                                      |
+| ------------------------ | ---------------------------------------------------------------- |
+| Option                   | Description                                                      |
+| ------------------------ | ---------------------------------------------------------------- |
+| `testInPlace()`          | Run from source directory (no copy)                              |
+| `skipInstall()`          | Skip `pulumi install`                                            |
+| `skipStackCreate()`      | Skip stack creation (must exist)                                 |
+| `stackName(name)`        | Set custom stack name                                            |
+| `configPassphrase(p)`    | Set config passphrase                                            |
+| `tempDir(path)`          | Set custom temp directory                                        |
+| `useAmbientBackend()`    | Use existing `pulumi login` backend instead of a private one     |
+| `env(key, value)`        | Set custom environment variable                                  |
+| `destroyExistingStack()` | Let `cleanup()` destroy a stack that existed before the run      |
+| `keepTempDir()`          | Leave the temporary copy on disk after `cleanup()`               |
 
-The temp directory defaults to `./tmp` under the current working directory, or `$PULUMITEST_TEMP_DIR` when set.
+The temp directory defaults to `./tmp` under the current working directory, or `$PULUMITEST_TEMP_DIR` when set. Temp directories are created readable only by the current user and are deleted by `cleanup()`.
+
+### Isolation defaults
+
+- **Backend.** Each program gets a private local file backend under its temp directory, so test stacks never reach the backend `pulumi login` points at. Pass `useAmbientBackend()` when a test needs Pulumi Cloud, for example to attach ESC environments, or set `env("PULUMI_BACKEND_URL", ...)` explicitly.
+- **Pre-existing stacks.** If the stack name already exists, it is selected rather than created and `program.stackPreexisted` is `true`. `cleanup()` will not destroy it unless `destroyExistingStack()` was given. This matters with `testInPlace()`, where the default stack name `test` may collide with a real stack in the project directory.
+- **Copied files.** `.git`, `.env` and `.env.*`, `node_modules`, `bin`, `obj`, `__pycache__`, `.venv`, `venv`, and `.terraform` are never copied, and symlinks that point outside the program directory are skipped.
+- **Passphrase.** The default config passphrase is the fixed, publicly known string `correct horse battery staple`. Secrets in a test stack's config are not protected by it. Pass `configPassphrase()` with a real value if that matters.
+- **`getEnvVars()`** returns the passphrase and anything passed via `env()`. Do not log it.
 
 Environment variables from `env()` are passed to the Automation API workspace and take precedence over the defaults, so `env("PULUMI_BACKEND_URL", "file:///tmp/backend")` runs the stack against a local file backend instead of the ambient one.
 
@@ -145,7 +157,7 @@ refresh.changeSummary; // OpMap
 
 ## Cleanup
 
-`cleanup()` destroys the stack and removes it. By default a failed destroy is logged but not thrown, so teardown never masks the test result. Pass `true` to make a failed destroy fail the teardown instead, which is useful in suites that must not leak cloud resources:
+`cleanup()` destroys the stack, removes it, and deletes the temporary copy of the program. A stack that existed before the run is left in place unless `destroyExistingStack()` was given. The temporary directory is kept when the destroy fails so state can be inspected. By default a failed destroy is logged but not thrown, so teardown never masks the test result. Pass `true` to make a failed destroy fail the teardown instead, which is useful in suites that must not leak cloud resources:
 
 ```typescript
 afterAll(() => program.cleanup(true));

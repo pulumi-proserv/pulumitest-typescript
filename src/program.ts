@@ -443,13 +443,24 @@ export class PulumiProgram {
         return { ...this.envVars };
     }
 
-    /** Copy the program to a new temporary directory. */
+    /**
+     * Copy the program to a new temporary directory.
+     *
+     * The returned program owns that directory and removes it in `cleanup()`.
+     */
     async copyToTempDir(...opts: opttest.Option[]): Promise<PulumiProgram> {
-        const { destination } = this.createTempDir();
-        return this.copyTo(destination, ...opts);
+        const { programDir, destination } = this.createTempDir();
+        const copy = await this.copyTo(destination, ...opts);
+        copy.ownedTempDir = programDir;
+        return copy;
     }
 
-    /** Copy the program to the specified directory. */
+    /**
+     * Copy the program to the specified directory.
+     *
+     * The caller chose `directory`, so the returned program does not remove it
+     * in `cleanup()`. Use {@link copyToTempDir} for a self-cleaning copy.
+     */
     async copyTo(directory: string, ...opts: opttest.Option[]): Promise<PulumiProgram> {
         this.copyToInternal(directory);
         const options = opttest.copyOptions(this.options);

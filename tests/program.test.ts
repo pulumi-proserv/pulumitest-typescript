@@ -591,4 +591,42 @@ describe("PulumiProgram file operations", () => {
         expect(path.dirname(path.dirname(copy.workingDir))).toBe(tempDir);
         expect(fs.readFileSync(path.join(copy.workingDir, "index.ts"), "utf8")).toBe("// v1\n");
     });
+
+    it("copyToTempDir copies own their directory and remove it on cleanup", async () => {
+        const tempDir = path.join(sandbox, "tmp");
+        const program = await PulumiProgram.create(
+            source,
+            { logger: silentLogger },
+            opttest.testInPlace(),
+            opttest.skipInstall(),
+            opttest.skipStackCreate(),
+            opttest.tempDir(tempDir),
+        );
+
+        const copy = await program.copyToTempDir();
+        const programDir = path.dirname(copy.workingDir);
+        expect(fs.existsSync(programDir)).toBe(true);
+
+        await copy.cleanup();
+
+        expect(fs.existsSync(programDir)).toBe(false);
+        expect(fs.existsSync(source)).toBe(true);
+    });
+
+    it("copyTo copies do not remove a caller-chosen directory on cleanup", async () => {
+        const program = await PulumiProgram.create(
+            source,
+            { logger: silentLogger },
+            opttest.tempDir(path.join(sandbox, "tmp")),
+            opttest.testInPlace(),
+            opttest.skipInstall(),
+            opttest.skipStackCreate(),
+        );
+
+        const target = path.join(sandbox, "copy");
+        const copy = await program.copyTo(target);
+        await copy.cleanup();
+
+        expect(fs.existsSync(path.join(target, "index.ts"))).toBe(true);
+    });
 });

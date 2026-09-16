@@ -6,23 +6,13 @@ A sibling [Python port](https://github.com/pulumi-labs/pulumitest-python) exists
 
 ## Installation
 
-The package is not published to npm yet. Install it from the GitHub repository:
+The package is distributed from this GitHub repository, not from the npm registry. Install it with a tag pinned for reproducible installs:
 
 ```bash
-npm install --save-dev github:pulumi-proserv/pulumitest-typescript
+npm install --save-dev github:pulumi-proserv/pulumitest-typescript#v0.1.0
 ```
 
-Pin to a tag or commit for reproducible installs, for example
-`github:pulumi-proserv/pulumitest-typescript#v0.1.0`. npm runs the package's
-`prepare` script on install, so the TypeScript is compiled on your machine and
-no prebuilt `dist/` is needed.
-
-The repository is internal, so the install needs a Git credential with access
-to the `pulumi-proserv` organization. Over SSH, use the explicit form:
-
-```bash
-npm install --save-dev git+ssh://git@github.com/pulumi-proserv/pulumitest-typescript.git#v0.1.0
-```
+npm runs the package's `prepare` script on install, so the TypeScript is compiled on your machine and no prebuilt `dist/` is needed. Release tags are listed on the [releases page](https://github.com/pulumi-proserv/pulumitest-typescript/releases); each also carries a packed tarball, which `npm install <tarball url>` accepts.
 
 ## Quick Start
 

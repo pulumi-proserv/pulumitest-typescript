@@ -42,6 +42,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { pathToFileURL } from "node:url";
 import { randomUUID } from "node:crypto";
 
 import * as auto from "@pulumi/pulumi/automation";
@@ -63,13 +64,76 @@ export interface PulumiProgramArgs {
     logger?: Logger;
 }
 
-function copyDirectory(srcDir: string, dest: string, filter?: (src: string) => boolean): void {
-    fs.cpSync(srcDir, dest, {
-        recursive: true,
-        force: true,
-        verbatimSymlinks: true,
-        filter,
-    });
+/**
+ * Directory and file names never copied from the program under test.
+ *
+ * These hold credentials (`.env*`), history that may contain old secrets
+ * (`.git`), or build output that is large and reproducible.
+ */
+export const EXCLUDED_NAMES: ReadonlySet<string> = new Set([
+    ".git",
+    ".env",
+    "node_modules",
+    "bin",
+    "obj",
+    "__pycache__",
+    ".venv",
+    "venv",
+    ".terraform",
+]);
+
+function isExcludedName(name: string): boolean {
+    return EXCLUDED_NAMES.has(name) || name.startsWith(".env.");
+}
+
+function shortId(): string {
+    return randomUUID().replace(/-/g, "").slice(0, 8);
+}
+
+/**
+ * Build a copy filter that skips excluded names, refuses symlinks whose target
+ * lies outside `sourceRoot`, and never descends into `avoid` (typically the
+ * destination, so copying a directory into its own subtree cannot recurse).
+ */
+function safeCopyFilter(sourceRoot: string, avoid: string[], extra?: (resolved: string) => boolean) {
+    const root = path.resolve(sourceRoot);
+    const avoidResolved = avoid.map((a) => path.resolve(a));
+    return (src: string): boolean => {
+        const resolved = path.resolve(src);
+        if (resolved === root) return true;
+        if (avoidResolved.some((a) => resolved === a || resolved.startsWith(a + path.sep))) return false;
+        if (isExcludedName(path.basename(resolved))) return false;
+        if (fs.lstatSync(resolved).isSymbolicLink()) {
+            const target = path.resolve(path.dirname(resolved), fs.readlinkSync(resolved));
+            if (target !== root && !target.startsWith(root + path.sep)) return false;
+        }
+        return extra ? extra(resolved) : true;
+    };
+}
+
+/**
+ * Recursive copy that consults `filter` for every entry before touching it.
+ * Symlinks are recreated verbatim, files overwrite, directories are created
+ * private to the current user. `fs.cpSync` is not used because it rejects
+ * copying a directory into its own subtree even when the filter excludes the
+ * destination, which is the common case of testing from the project root
+ * with the default `./tmp`.
+ */
+function copyDirectory(srcDir: string, dest: string, filter: (src: string) => boolean): void {
+    fs.mkdirSync(dest, { recursive: true, mode: 0o700 });
+    for (const entry of fs.readdirSync(srcDir, { withFileTypes: true })) {
+        const from = path.join(srcDir, entry.name);
+        if (!filter(from)) continue;
+        const to = path.join(dest, entry.name);
+        if (entry.isSymbolicLink()) {
+            fs.rmSync(to, { force: true, recursive: true });
+            fs.symlinkSync(fs.readlinkSync(from), to);
+        } else if (entry.isDirectory()) {
+            copyDirectory(from, to, filter);
+        } else {
+            fs.copyFileSync(from, to);
+        }
+    }
 }
 
 /** Names preserved in the working directory when the source is swapped out. */
@@ -94,6 +158,16 @@ export class PulumiProgram {
     logger: Logger;
     currentStack: auto.Stack | undefined;
     localWorkspace: auto.LocalWorkspace | undefined;
+    /**
+     * True when the stack already existed and was selected rather than
+     * created. `cleanup()` refuses to destroy such a stack unless
+     * `opttest.destroyExistingStack()` was given.
+     */
+    stackPreexisted = false;
+    /** Directory this program created and will remove in `cleanup()`, if any. */
+    private ownedTempDir: string | undefined;
+    /** Local file backend directory created for this program, if any. */
+    private backendDir: string | undefined;
     private envVars: Record<string, string>;
 
     private constructor(workingDir: string, options: opttest.Options, logger: Logger) {
@@ -102,11 +176,8 @@ export class PulumiProgram {
         this.logger = logger;
         this.currentStack = undefined;
         this.localWorkspace = undefined;
-        // Custom env vars from the env() option take precedence over defaults.
         this.envVars = {
-            PULUMI_BACKEND_URL: process.env.PULUMI_BACKEND_URL ?? "",
-            PULUMI_CONFIG_PASSPHRASE: this.options.configPassphrase || "correct horse battery staple",
-            ...this.options.customEnv,
+            PULUMI_CONFIG_PASSPHRASE: this.options.configPassphrase || opttest.DEFAULT_CONFIG_PASSPHRASE,
         };
     }
 
@@ -150,36 +221,65 @@ export class PulumiProgram {
         const program = new PulumiProgram(workingDir, options, logger);
 
         if (!program.options.testInPlace) {
-            const destination = program.createTempDir();
+            const { programDir, destination } = program.createTempDir();
+            program.ownedTempDir = programDir;
             program.copyToInternal(destination);
             program.workingDir = destination;
         }
 
+        program.configureBackend();
         await program.initStack();
         return program;
     }
 
-    private createTempDir(): string {
-        let baseDir: string;
-        if (this.options.tempDir) {
-            baseDir = this.options.tempDir;
-        } else {
-            baseDir = path.join(process.cwd(), "tmp");
-        }
-        fs.mkdirSync(baseDir, { recursive: true });
+    private tempBase(): string {
+        return this.options.tempDir ? this.options.tempDir : path.join(process.cwd(), "tmp");
+    }
 
-        const tempPath = path.join(baseDir, `programDir_${randomUUID().replace(/-/g, "").slice(0, 8)}`);
-        this.logger.info(`Creating temp directory ${path.basename(tempPath)}`);
+    /**
+     * Create `<tempBase>/programDir_<id>/<program name>`.
+     *
+     * Directories are private to the current user (`0700`) because the copy may
+     * include stack config and state.
+     */
+    private createTempDir(): { programDir: string; destination: string } {
+        const baseDir = this.tempBase();
+        fs.mkdirSync(baseDir, { recursive: true, mode: 0o700 });
+
+        const programDir = path.join(baseDir, `programDir_${shortId()}`);
+        this.logger.info(`Creating temp directory ${path.basename(programDir)}`);
 
         const sourceBase = path.basename(path.resolve(this.workingDir));
-        const destination = path.join(tempPath, sourceBase);
-        fs.mkdirSync(destination, { recursive: true, mode: 0o755 });
-        return destination;
+        const destination = path.join(programDir, sourceBase);
+        fs.mkdirSync(destination, { recursive: true, mode: 0o700 });
+        return { programDir, destination };
+    }
+
+    /**
+     * Pick the backend. Precedence: an explicit `env("PULUMI_BACKEND_URL", ...)`,
+     * then the ambient backend if `useAmbientBackend()` was given, otherwise a
+     * private local file backend so test stacks never reach a shared backend.
+     */
+    private configureBackend(): void {
+        if (this.options.customEnv.PULUMI_BACKEND_URL === undefined && !this.options.useAmbientBackend) {
+            const backendDir = this.ownedTempDir
+                ? path.join(this.ownedTempDir, "backend")
+                : path.join(this.tempBase(), `backend_${shortId()}`);
+            fs.mkdirSync(backendDir, { recursive: true, mode: 0o700 });
+            this.backendDir = backendDir;
+            this.envVars.PULUMI_BACKEND_URL = pathToFileURL(backendDir).href;
+        }
+        // Custom env vars from the env() option take precedence over defaults.
+        Object.assign(this.envVars, this.options.customEnv);
     }
 
     private copyToInternal(directory: string): void {
         try {
-            copyDirectory(this.workingDir, directory);
+            copyDirectory(
+                this.workingDir,
+                directory,
+                safeCopyFilter(this.workingDir, [directory, this.tempBase()]),
+            );
         } catch (e) {
             throw new Error(`Error copying program to ${directory}: ${errorMessage(e)}`, { cause: e });
         }
@@ -195,21 +295,39 @@ export class PulumiProgram {
             await this.localWorkspace.install();
         }
 
-        if (!this.options.skipStackCreate) {
-            const stackName = this.options.stackName || PulumiProgram.defaultStackName;
-            this.logger.info(`Running pulumi stack init... (stack: ${stackName})`);
-            this.currentStack = await auto.LocalWorkspace.createOrSelectStack(
-                { stackName, workDir: this.workingDir },
-                { envVars },
-            );
-        } else {
+        if (this.options.skipStackCreate) {
             this.logger.info("Skipping stack creation (skipStackCreate=true)");
+            return;
+        }
+
+        const stackName = this.options.stackName || PulumiProgram.defaultStackName;
+        const args = { stackName, workDir: this.workingDir };
+        this.logger.info(`Running pulumi stack init... (stack: ${stackName})`);
+        try {
+            this.currentStack = await auto.LocalWorkspace.createStack(args, { envVars });
+        } catch (e) {
+            if (!(e instanceof auto.StackAlreadyExistsError)) {
+                throw e;
+            }
+            this.currentStack = await auto.LocalWorkspace.selectStack(args, { envVars });
+            this.stackPreexisted = true;
+            this.logger.info(
+                `Stack '${stackName}' already existed and was selected, not created. ` +
+                    (this.options.destroyExistingStack
+                        ? "cleanup() will destroy it because destroyExistingStack() was given."
+                        : "cleanup() will leave it in place; pass opttest.destroyExistingStack() to destroy it."),
+            );
         }
     }
 
     /**
-     * Destroy and remove the stack. Register with your test framework's
-     * teardown hook.
+     * Destroy and remove the stack, then delete the temporary copy of the
+     * program. Register with your test framework's teardown hook.
+     *
+     * A stack that existed before this run is left untouched unless
+     * `opttest.destroyExistingStack()` was given. The temporary directory is
+     * kept when the destroy fails, so the state is available for inspection,
+     * or when `opttest.keepTempDir()` was given.
      *
      * @param raiseOnError Re-throw if the destroy fails. Defaults to false to
      *   preserve existing behaviour, but a failed destroy leaves real cloud
@@ -219,6 +337,15 @@ export class PulumiProgram {
     async cleanup(raiseOnError = false): Promise<void> {
         if (this.currentStack === undefined) {
             this.logger.info("No current stack, skipping destroy...");
+            this.removeTempDirs();
+            return;
+        }
+
+        if (this.stackPreexisted && !this.options.destroyExistingStack) {
+            this.logger.info(
+                `Stack '${this.currentStack.name}' existed before this run; leaving it in place. ` +
+                    "Pass opttest.destroyExistingStack() to destroy it.",
+            );
             return;
         }
 
@@ -232,6 +359,19 @@ export class PulumiProgram {
             );
             if (raiseOnError) {
                 throw e;
+            }
+            return;
+        }
+        this.removeTempDirs();
+    }
+
+    private removeTempDirs(): void {
+        if (this.options.keepTempDir) {
+            return;
+        }
+        for (const dir of [this.ownedTempDir, this.backendDir]) {
+            if (dir !== undefined && fs.existsSync(dir)) {
+                fs.rmSync(dir, { recursive: true, force: true });
             }
         }
     }
@@ -274,11 +414,14 @@ export class PulumiProgram {
         this.logger.info(`Updating source from ${sourceDir} to ${this.workingDir}`);
         const sourceRoot = path.resolve(sourceDir);
         try {
-            copyDirectory(sourceRoot, this.workingDir, (src) => {
-                const resolved = path.resolve(src);
-                const isTopLevel = path.dirname(resolved) === sourceRoot;
-                return !(isTopLevel && PRESERVED_PATHS.has(path.basename(resolved)));
-            });
+            copyDirectory(
+                sourceRoot,
+                this.workingDir,
+                safeCopyFilter(sourceRoot, [this.workingDir], (resolved) => {
+                    const isTopLevel = path.dirname(resolved) === sourceRoot;
+                    return !(isTopLevel && PRESERVED_PATHS.has(path.basename(resolved)));
+                }),
+            );
         } catch (e) {
             throw new Error(`Error updating source from ${sourceDir}: ${errorMessage(e)}`, { cause: e });
         }
@@ -290,18 +433,34 @@ export class PulumiProgram {
         await stack.addEnvironments(...environmentNames);
     }
 
-    /** Get the environment variables for this workspace. */
+    /**
+     * Get the environment variables for this workspace.
+     *
+     * Includes the config passphrase and anything passed via `opttest.env()`,
+     * which may be credentials. Do not log the returned object.
+     */
     getEnvVars(): Record<string, string> {
         return { ...this.envVars };
     }
 
-    /** Copy the program to a new temporary directory. */
+    /**
+     * Copy the program to a new temporary directory.
+     *
+     * The returned program owns that directory and removes it in `cleanup()`.
+     */
     async copyToTempDir(...opts: opttest.Option[]): Promise<PulumiProgram> {
-        const destination = this.createTempDir();
-        return this.copyTo(destination, ...opts);
+        const { programDir, destination } = this.createTempDir();
+        const copy = await this.copyTo(destination, ...opts);
+        copy.ownedTempDir = programDir;
+        return copy;
     }
 
-    /** Copy the program to the specified directory. */
+    /**
+     * Copy the program to the specified directory.
+     *
+     * The caller chose `directory`, so the returned program does not remove it
+     * in `cleanup()`. Use {@link copyToTempDir} for a self-cleaning copy.
+     */
     async copyTo(directory: string, ...opts: opttest.Option[]): Promise<PulumiProgram> {
         this.copyToInternal(directory);
         const options = opttest.copyOptions(this.options);

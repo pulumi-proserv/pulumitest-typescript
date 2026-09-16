@@ -17,9 +17,10 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => {
+    class StackAlreadyExistsError extends Error {}
     const workspace = { install: vi.fn(async () => {}) };
     const stack = {
         name: "test",
@@ -32,15 +33,18 @@ const mocks = vi.hoisted(() => {
     return {
         workspace,
         stack,
+        StackAlreadyExistsError,
         LocalWorkspace: {
             create: vi.fn(async () => workspace),
-            createOrSelectStack: vi.fn(async () => stack),
+            createStack: vi.fn(async () => stack),
+            selectStack: vi.fn(async () => stack),
         },
     };
 });
 
 vi.mock("@pulumi/pulumi/automation", () => ({
     LocalWorkspace: mocks.LocalWorkspace,
+    StackAlreadyExistsError: mocks.StackAlreadyExistsError,
 }));
 
 import * as pulumitest from "../src/index";
@@ -49,13 +53,26 @@ import type { Logger } from "../src/index";
 
 const silentLogger: Logger = { info: () => {}, error: () => {} };
 
+// Every program in this file gets its temp and backend directories under one
+// sandbox so nothing is written into the repository's ./tmp.
+let tmpBase: string;
+
 function quietProgram(...opts: opttest.Option[]): Promise<PulumiProgram> {
-    return PulumiProgram.create("test_stack", { logger: silentLogger }, ...opts);
+    return PulumiProgram.create("test_stack", { logger: silentLogger }, opttest.tempDir(tmpBase), ...opts);
 }
+
+beforeAll(() => {
+    tmpBase = fs.mkdtempSync(path.join(os.tmpdir(), "pulumitest-base-"));
+});
+
+afterAll(() => {
+    fs.rmSync(tmpBase, { recursive: true, force: true });
+});
 
 beforeEach(() => {
     vi.clearAllMocks();
     mocks.stack.destroy.mockResolvedValue({});
+    mocks.LocalWorkspace.createStack.mockResolvedValue(mocks.stack);
 });
 
 describe("PulumiProgram.create", () => {
@@ -84,17 +101,42 @@ describe("PulumiProgram.create", () => {
             expect.objectContaining({ workDir: "test_stack" }),
         );
         expect(mocks.workspace.install).not.toHaveBeenCalled();
-        expect(mocks.LocalWorkspace.createOrSelectStack).not.toHaveBeenCalled();
+        expect(mocks.LocalWorkspace.createStack).not.toHaveBeenCalled();
+        expect(mocks.LocalWorkspace.selectStack).not.toHaveBeenCalled();
     });
 
     it("creates a stack when not skipped", async () => {
         const program = await quietProgram(opttest.testInPlace(), opttest.skipInstall());
 
         expect(program.currentStack).toBe(mocks.stack);
-        expect(mocks.LocalWorkspace.createOrSelectStack).toHaveBeenCalledWith(
+        expect(program.stackPreexisted).toBe(false);
+        expect(mocks.LocalWorkspace.createStack).toHaveBeenCalledWith(
             { stackName: "test", workDir: "test_stack" },
             expect.anything(),
         );
+        expect(mocks.LocalWorkspace.selectStack).not.toHaveBeenCalled();
+    });
+
+    it("selects a pre-existing stack and records that it was not created", async () => {
+        mocks.LocalWorkspace.createStack.mockRejectedValueOnce(new mocks.StackAlreadyExistsError("exists"));
+
+        const program = await quietProgram(opttest.testInPlace(), opttest.skipInstall());
+
+        expect(program.currentStack).toBe(mocks.stack);
+        expect(program.stackPreexisted).toBe(true);
+        expect(mocks.LocalWorkspace.selectStack).toHaveBeenCalledWith(
+            { stackName: "test", workDir: "test_stack" },
+            expect.anything(),
+        );
+    });
+
+    it("re-throws stack creation errors other than already-exists", async () => {
+        mocks.LocalWorkspace.createStack.mockRejectedValueOnce(new Error("backend unreachable"));
+
+        await expect(quietProgram(opttest.testInPlace(), opttest.skipInstall())).rejects.toThrow(
+            "backend unreachable",
+        );
+        expect(mocks.LocalWorkspace.selectStack).not.toHaveBeenCalled();
     });
 
     it("passes env vars to the workspace and stack", async () => {
@@ -115,17 +157,39 @@ describe("PulumiProgram.create", () => {
             workDir: "test_stack",
             envVars: expected,
         });
-        expect(mocks.LocalWorkspace.createOrSelectStack).toHaveBeenCalledWith(
+        expect(mocks.LocalWorkspace.createStack).toHaveBeenCalledWith(
             { stackName: "test", workDir: "test_stack" },
             { envVars: expected },
         );
     });
 
-    it("drops empty env vars before passing them to the workspace", async () => {
+    it("uses a private local file backend by default", async () => {
+        const program = await quietProgram(
+            opttest.testInPlace(),
+            opttest.skipInstall(),
+            opttest.skipStackCreate(),
+        );
+
+        const url = program.getEnvVars().PULUMI_BACKEND_URL;
+        expect(url).toMatch(/^file:\/\//);
+        const dir = decodeURIComponent(new URL(url).pathname);
+        expect(fs.existsSync(dir)).toBe(true);
+        expect(path.dirname(dir)).toBe(tmpBase);
+        if (process.platform !== "win32") {
+            expect(fs.statSync(dir).mode & 0o777).toBe(0o700);
+        }
+    });
+
+    it("leaves the backend unset when useAmbientBackend is given", async () => {
         const saved = process.env.PULUMI_BACKEND_URL;
         delete process.env.PULUMI_BACKEND_URL;
         try {
-            await quietProgram(opttest.testInPlace(), opttest.skipInstall(), opttest.skipStackCreate());
+            await quietProgram(
+                opttest.testInPlace(),
+                opttest.skipInstall(),
+                opttest.skipStackCreate(),
+                opttest.useAmbientBackend(),
+            );
         } finally {
             if (saved !== undefined) process.env.PULUMI_BACKEND_URL = saved;
         }
@@ -144,7 +208,7 @@ describe("PulumiProgram.create", () => {
     it("uses a custom stack name", async () => {
         await quietProgram(opttest.testInPlace(), opttest.skipInstall(), opttest.stackName("custom"));
 
-        expect(mocks.LocalWorkspace.createOrSelectStack).toHaveBeenCalledWith(
+        expect(mocks.LocalWorkspace.createStack).toHaveBeenCalledWith(
             { stackName: "custom", workDir: "test_stack" },
             expect.anything(),
         );
@@ -153,6 +217,7 @@ describe("PulumiProgram.create", () => {
     it("accepts options without an args object", async () => {
         const program = await PulumiProgram.create(
             "test_stack",
+            opttest.tempDir(tmpBase),
             opttest.testInPlace(),
             opttest.skipInstall(),
             opttest.skipStackCreate(),
@@ -232,11 +297,44 @@ describe("PulumiProgram.cleanup", () => {
         expect(mocks.stack.destroy).toHaveBeenCalledWith({ remove: true });
     });
 
+    it("refuses to destroy a stack that existed before the run", async () => {
+        const infos: string[] = [];
+        mocks.LocalWorkspace.createStack.mockRejectedValueOnce(new mocks.StackAlreadyExistsError("exists"));
+        const program = await PulumiProgram.create(
+            "test_stack",
+            { logger: { info: (m) => infos.push(m), error: () => {} } },
+            opttest.tempDir(tmpBase),
+            opttest.testInPlace(),
+            opttest.skipInstall(),
+        );
+
+        await program.cleanup();
+        await program.cleanup(true);
+
+        expect(mocks.stack.destroy).not.toHaveBeenCalled();
+        expect(infos.some((m) => /existed before this run/.test(m))).toBe(true);
+    });
+
+    it("destroys a pre-existing stack when destroyExistingStack is given", async () => {
+        mocks.LocalWorkspace.createStack.mockRejectedValueOnce(new mocks.StackAlreadyExistsError("exists"));
+        const program = await quietProgram(
+            opttest.testInPlace(),
+            opttest.skipInstall(),
+            opttest.destroyExistingStack(),
+        );
+
+        await program.cleanup();
+
+        expect(program.stackPreexisted).toBe(true);
+        expect(mocks.stack.destroy).toHaveBeenCalledWith({ remove: true });
+    });
+
     it("swallows destroy errors by default", async () => {
         const errors: string[] = [];
         const program = await PulumiProgram.create(
             "test_stack",
             { logger: { info: () => {}, error: (m) => errors.push(m) } },
+            opttest.tempDir(tmpBase),
             opttest.testInPlace(),
             opttest.skipInstall(),
         );
@@ -295,6 +393,132 @@ describe("PulumiProgram file operations", () => {
         expect(mocks.LocalWorkspace.create).toHaveBeenCalledWith(
             expect.objectContaining({ workDir: program.workingDir }),
         );
+        // The backend lives next to the copy, so one cleanup removes both.
+        expect(program.getEnvVars().PULUMI_BACKEND_URL).toBe(
+            `file://${path.join(path.dirname(program.workingDir), "backend")}`,
+        );
+    });
+
+    it("creates temp directories readable only by the current user", async () => {
+        if (process.platform === "win32") return;
+        const tempDir = path.join(sandbox, "tmp");
+        const program = await PulumiProgram.create(
+            source,
+            { logger: silentLogger },
+            opttest.skipInstall(),
+            opttest.skipStackCreate(),
+            opttest.tempDir(tempDir),
+        );
+
+        for (const dir of [tempDir, path.dirname(program.workingDir), program.workingDir]) {
+            expect(fs.statSync(dir).mode & 0o777).toBe(0o700);
+        }
+    });
+
+    it("does not copy .git, .env files, or dependency and build directories", async () => {
+        for (const dir of [".git", "node_modules", "bin", "obj", "__pycache__", ".venv"]) {
+            fs.mkdirSync(path.join(source, dir), { recursive: true });
+            fs.writeFileSync(path.join(source, dir, "x"), "x\n");
+        }
+        fs.writeFileSync(path.join(source, ".env"), "SECRET=1\n");
+        fs.writeFileSync(path.join(source, ".env.local"), "SECRET=2\n");
+        fs.writeFileSync(path.join(source, ".envrc"), "keep\n");
+
+        const program = await PulumiProgram.create(
+            source,
+            { logger: silentLogger },
+            opttest.skipInstall(),
+            opttest.skipStackCreate(),
+            opttest.tempDir(path.join(sandbox, "tmp")),
+        );
+
+        for (const name of [
+            ".git",
+            "node_modules",
+            "bin",
+            "obj",
+            "__pycache__",
+            ".venv",
+            ".env",
+            ".env.local",
+        ]) {
+            expect(fs.existsSync(path.join(program.workingDir, name))).toBe(false);
+        }
+        expect(fs.existsSync(path.join(program.workingDir, ".envrc"))).toBe(true);
+        expect(fs.existsSync(path.join(program.workingDir, "index.ts"))).toBe(true);
+    });
+
+    it("copies symlinks inside the program but skips ones that escape it", async () => {
+        if (process.platform === "win32") return;
+        fs.symlinkSync(path.join("nested", "file.txt"), path.join(source, "inside-link"));
+        fs.symlinkSync(sandbox, path.join(source, "escape-dir"));
+        fs.writeFileSync(path.join(sandbox, "outside.txt"), "outside\n");
+        fs.symlinkSync(path.join("..", "outside.txt"), path.join(source, "escape-file"));
+
+        const program = await PulumiProgram.create(
+            source,
+            { logger: silentLogger },
+            opttest.skipInstall(),
+            opttest.skipStackCreate(),
+            opttest.tempDir(path.join(sandbox, "tmp")),
+        );
+
+        expect(fs.lstatSync(path.join(program.workingDir, "inside-link")).isSymbolicLink()).toBe(true);
+        expect(fs.existsSync(path.join(program.workingDir, "escape-dir"))).toBe(false);
+        expect(fs.existsSync(path.join(program.workingDir, "escape-file"))).toBe(false);
+    });
+
+    it("does not recurse into its own temp directory when the source contains it", async () => {
+        // Default temp base is ./tmp under cwd; simulate the program living in cwd.
+        const tempDir = path.join(source, "tmp");
+        const program = await PulumiProgram.create(
+            source,
+            { logger: silentLogger },
+            opttest.skipInstall(),
+            opttest.skipStackCreate(),
+            opttest.tempDir(tempDir),
+        );
+
+        expect(fs.existsSync(path.join(program.workingDir, "tmp"))).toBe(false);
+        expect(fs.existsSync(path.join(program.workingDir, "index.ts"))).toBe(true);
+    });
+
+    it("removes the temp directory and backend on cleanup", async () => {
+        const program = await PulumiProgram.create(
+            source,
+            { logger: silentLogger },
+            opttest.skipInstall(),
+            opttest.tempDir(path.join(sandbox, "tmp")),
+        );
+        const programDir = path.dirname(program.workingDir);
+        expect(fs.existsSync(programDir)).toBe(true);
+
+        await program.cleanup();
+
+        expect(mocks.stack.destroy).toHaveBeenCalledWith({ remove: true });
+        expect(fs.existsSync(programDir)).toBe(false);
+    });
+
+    it("keeps the temp directory when the destroy fails or keepTempDir is given", async () => {
+        const failing = await PulumiProgram.create(
+            source,
+            { logger: silentLogger },
+            opttest.skipInstall(),
+            opttest.tempDir(path.join(sandbox, "tmp")),
+        );
+        mocks.stack.destroy.mockRejectedValueOnce(new Error("destroy failed"));
+        await failing.cleanup();
+        expect(fs.existsSync(failing.workingDir)).toBe(true);
+
+        const kept = await PulumiProgram.create(
+            source,
+            { logger: silentLogger },
+            opttest.skipInstall(),
+            opttest.tempDir(path.join(sandbox, "tmp")),
+            opttest.keepTempDir(),
+        );
+        await kept.cleanup();
+        expect(fs.existsSync(kept.workingDir)).toBe(true);
     });
 
     it("updateSource replaces files but preserves project and state files", async () => {
@@ -315,6 +539,7 @@ describe("PulumiProgram file operations", () => {
         fs.writeFileSync(path.join(modified, ".pulumi", "state"), "SHOULD_NOT_COPY\n");
         fs.writeFileSync(path.join(modified, "index.ts"), "// v2\n");
         fs.writeFileSync(path.join(modified, "extra.ts"), "// extra\n");
+        fs.writeFileSync(path.join(modified, ".env"), "SHOULD_NOT_COPY\n");
 
         program.updateSource(modified);
 
@@ -324,12 +549,14 @@ describe("PulumiProgram file operations", () => {
         expect(read("Pulumi.yaml")).toBe("name: my_program\nruntime: nodejs\n");
         expect(read(path.join(".pulumi", "state"))).toBe("state\n");
         expect(fs.existsSync(path.join(program.workingDir, "Pulumi.test.yaml"))).toBe(false);
+        expect(fs.existsSync(path.join(program.workingDir, ".env"))).toBe(false);
     });
 
     it("copyTo creates an in-place program in the target directory", async () => {
         const program = await PulumiProgram.create(
             source,
             { logger: silentLogger },
+            opttest.tempDir(path.join(sandbox, "tmp")),
             opttest.testInPlace(),
             opttest.skipInstall(),
             opttest.skipStackCreate(),
@@ -363,5 +590,43 @@ describe("PulumiProgram file operations", () => {
         expect(copy.options.testInPlace).toBe(true);
         expect(path.dirname(path.dirname(copy.workingDir))).toBe(tempDir);
         expect(fs.readFileSync(path.join(copy.workingDir, "index.ts"), "utf8")).toBe("// v1\n");
+    });
+
+    it("copyToTempDir copies own their directory and remove it on cleanup", async () => {
+        const tempDir = path.join(sandbox, "tmp");
+        const program = await PulumiProgram.create(
+            source,
+            { logger: silentLogger },
+            opttest.testInPlace(),
+            opttest.skipInstall(),
+            opttest.skipStackCreate(),
+            opttest.tempDir(tempDir),
+        );
+
+        const copy = await program.copyToTempDir();
+        const programDir = path.dirname(copy.workingDir);
+        expect(fs.existsSync(programDir)).toBe(true);
+
+        await copy.cleanup();
+
+        expect(fs.existsSync(programDir)).toBe(false);
+        expect(fs.existsSync(source)).toBe(true);
+    });
+
+    it("copyTo copies do not remove a caller-chosen directory on cleanup", async () => {
+        const program = await PulumiProgram.create(
+            source,
+            { logger: silentLogger },
+            opttest.tempDir(path.join(sandbox, "tmp")),
+            opttest.testInPlace(),
+            opttest.skipInstall(),
+            opttest.skipStackCreate(),
+        );
+
+        const target = path.join(sandbox, "copy");
+        const copy = await program.copyTo(target);
+        await copy.cleanup();
+
+        expect(fs.existsSync(path.join(target, "index.ts"))).toBe(true);
     });
 });

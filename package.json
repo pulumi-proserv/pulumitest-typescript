@@ -1,54 +1,54 @@
 {
-    "name": "pulumitest",
-    "version": "0.1.0",
-    "description": "TypeScript testing utilities for Pulumi programs",
-    "license": "Apache-2.0",
-    "author": {
-        "name": "Jonathan Davenport",
-        "email": "jdavenport@pulumi.com"
-    },
-    "repository": {
-        "type": "git",
-        "url": "git+https://github.com/pulumi-proserv/pulumitest-typescript.git"
-    },
-    "keywords": [
-        "pulumi",
-        "testing",
-        "automation-api",
-        "infrastructure"
-    ],
-    "main": "dist/index.js",
-    "types": "dist/index.d.ts",
-    "files": [
-        "dist",
-        "README.md",
-        "LICENSE",
-        "CHANGELOG.md"
-    ],
-    "engines": {
-        "node": ">=20"
-    },
-    "scripts": {
-        "build": "tsc -p tsconfig.build.json",
-        "clean": "rm -rf dist",
-        "test": "vitest run",
-        "test:watch": "vitest",
-        "typecheck": "tsc --noEmit",
-        "lint": "eslint . && prettier --check .",
-        "lint:fix": "eslint . --fix && prettier --write .",
-        "prepare": "npm run build",
-        "prepack": "npm run clean && npm run build"
-    },
-    "dependencies": {
-        "@pulumi/pulumi": "^3.262.0"
-    },
-    "devDependencies": {
-        "@eslint/js": "^9.39.5",
-        "@types/node": "^26.4.1",
-        "eslint": "^9.39.5",
-        "prettier": "^3.9.6",
-        "typescript": "^6.0.3",
-        "typescript-eslint": "^8.69.0",
-        "vitest": "^4.1.11"
-    }
+  "name": "pulumitest",
+  "version": "0.1.0",
+  "description": "TypeScript testing utilities for Pulumi programs",
+  "license": "Apache-2.0",
+  "author": {
+    "name": "Jonathan Davenport",
+    "email": "jdavenport@pulumi.com"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pulumi-proserv/pulumitest-typescript.git"
+  },
+  "keywords": [
+    "pulumi",
+    "testing",
+    "automation-api",
+    "infrastructure"
+  ],
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "clean": "rm -rf dist",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint . && prettier --check .",
+    "lint:fix": "eslint . --fix && prettier --write .",
+    "prepare": "npm run build",
+    "prepack": "npm run clean && npm run build"
+  },
+  "dependencies": {
+    "@pulumi/pulumi": "^3.262.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.5",
+    "@types/node": "^26.4.1",
+    "eslint": "^9.39.5",
+    "prettier": "^3.9.6",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.69.0",
+    "vitest": "^4.1.11"
+  }
 }

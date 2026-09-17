@@ -1,6 +1,6 @@
 {
   "name": "pulumitest",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "TypeScript testing utilities for Pulumi programs",
   "license": "Apache-2.0",
   "author": {
@@ -40,7 +40,7 @@
     "prepack": "npm run clean && npm run build"
   },
   "dependencies": {
-    "@pulumi/pulumi": "^3.262.0"
+    "@pulumi/pulumi": "^3.97.0"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.5",

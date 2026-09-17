@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-09-17
+
+### Changed
+
+- `@pulumi/pulumi` dependency range is `^3.97.0`, the first release with `Stack.addEnvironments`. A dependency bump had narrowed it to `^3.262.0`, which the library does not need
+- README installation section written for the public repository; the package is distributed from GitHub Releases and is not published to npm
+- Added `.github/CODEOWNERS`
+- CI and release workflows use `actions/checkout` v7, `actions/setup-node` v7, and `softprops/action-gh-release` v3; vitest 4 for the test suite
+
+## [0.1.0] - 2026-09-14
+
 ### Security
 
 - `cleanup()` no longer destroys a stack that existed before the run. Such a stack is selected, `stackPreexisted` is set, and destroy is skipped unless `opttest.destroyExistingStack()` is given
@@ -29,3 +40,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Direct access to Pulumi Automation API via `currentStack` and `localWorkspace` properties
 - CI pipeline with lint and test matrix (Node.js 20, 22, 24)
 - Tag-triggered release pipeline publishing an npm tarball to GitHub Releases
+
+[Unreleased]: https://github.com/pulumi-proserv/pulumitest-typescript/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/pulumi-proserv/pulumitest-typescript/compare/v0.1.0...v0.1.1
+[0.1.0]: https://github.com/pulumi-proserv/pulumitest-typescript/releases/tag/v0.1.0
